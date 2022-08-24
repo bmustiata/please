@@ -14,16 +14,17 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/thought-machine/go-flags"
 	"go.uber.org/automaxprocs/maxprocs"
-	"gopkg.in/op/go-logging.v1"
 
 	"github.com/thought-machine/please/src/assets"
 	"github.com/thought-machine/please/src/build"
 	"github.com/thought-machine/please/src/cache"
 	"github.com/thought-machine/please/src/clean"
 	"github.com/thought-machine/please/src/cli"
+	"github.com/thought-machine/please/src/cli/logging"
 	"github.com/thought-machine/please/src/core"
 	"github.com/thought-machine/please/src/debug"
 	"github.com/thought-machine/please/src/exec"
@@ -49,7 +50,7 @@ import (
 	"github.com/thought-machine/please/src/worker"
 )
 
-var log = logging.MustGetLogger("plz")
+var log = logging.Log
 
 var config *core.Configuration
 
@@ -81,13 +82,14 @@ var opts struct {
 		CompletionScript  bool          `long:"completion_script" description:"Prints the bash / zsh completion script to stdout"`
 	} `group:"Options controlling output & logging"`
 
-	FeatureFlags struct {
+	BehaviorFlags struct {
 		NoUpdate           bool    `long:"noupdate" description:"Disable Please attempting to auto-update itself."`
 		NoHashVerification bool    `long:"nohash_verification" description:"Hash verification errors are nonfatal."`
 		NoLock             bool    `long:"nolock" description:"Don't attempt to lock the repo exclusively. Use with care."`
 		KeepWorkdirs       bool    `long:"keep_workdirs" description:"Don't clean directories in plz-out/tmp after successfully building targets."`
 		HTTPProxy          cli.URL `long:"http_proxy" env:"HTTP_PROXY" description:"HTTP proxy to use for downloads"`
-	} `group:"Options that enable / disable certain features"`
+		Debug              bool    `long:"debug" description:"When enabled, Please will enter into an interactive debugger when breakpoint() is called during parsing."`
+	} `group:"Options that enable / disable certain behaviors"`
 
 	HelpFlags struct {
 		Help    bool `short:"h" long:"help" description:"Show this help message"`
@@ -137,8 +139,9 @@ var opts struct {
 		// Slightly awkward since we can specify a single test with arguments or multiple test targets.
 		Args struct {
 			Target core.BuildLabel `positional-arg-name:"target" description:"Target to test"`
-			Args   []string        `positional-arg-name:"arguments" description:"Arguments or test selectors"`
+			Args   TargetsOrArgs   `positional-arg-name:"arguments" description:"Arguments or test selectors"`
 		} `positional-args:"true"`
+		StateArgs []string `no-flag:"true"`
 	} `command:"test" description:"Builds and tests one or more targets"`
 
 	Cover struct {
@@ -163,8 +166,8 @@ var opts struct {
 		Shell               string        `long:"shell" choice:"shell" choice:"run" optional:"true" optional-value:"shell" description:"Opens a shell in the test directory with the appropriate environment variables."`
 		StreamResults       bool          `long:"stream_results" description:"Prints test results on stdout as they are run."`
 		Args                struct {
-			Target core.BuildLabel `positional-arg-name:"target" description:"Target to test" group:"one test"`
-			Args   []string        `positional-arg-name:"arguments" description:"Arguments or test selectors" group:"one test"`
+			Target core.BuildLabel `positional-arg-name:"target" description:"Target to test"`
+			Args   TargetsOrArgs   `positional-arg-name:"arguments" description:"Arguments or test selectors"`
 		} `positional-args:"true"`
 	} `command:"cover" description:"Builds and tests one or more targets, and calculates coverage."`
 
@@ -188,7 +191,7 @@ var opts struct {
 		Parallel   struct {
 			NumTasks       int                `short:"n" long:"num_tasks" default:"10" description:"Maximum number of subtasks to run in parallel"`
 			Quiet          bool               `short:"q" long:"quiet" description:"Deprecated in favour of --output=quiet. Suppress output from successful subprocesses."`
-			Output         run.ParallelOutput `long:"output" default:"default" choice:"default" choice:"quiet" choice:"group_immediate" description:"Allows to control how the output should be handled."`
+			Output         process.OutputMode `long:"output" default:"default" choice:"default" choice:"quiet" choice:"group_immediate" description:"Allows to control how the output should be handled."`
 			PositionalArgs struct {
 				Targets []core.AnnotatedOutputLabel `positional-arg-name:"target" description:"Targets to run"`
 			} `positional-args:"true" required:"true"`
@@ -196,7 +199,8 @@ var opts struct {
 			Detach bool          `long:"detach" description:"Detach from the parent process when all children have spawned"`
 		} `command:"parallel" description:"Runs a sequence of targets in parallel"`
 		Sequential struct {
-			Quiet          bool `short:"q" long:"quiet" description:"Suppress output from successful subprocesses."`
+			Quiet          bool               `short:"q" long:"quiet" description:"Suppress output from successful subprocesses."`
+			Output         process.OutputMode `long:"output" default:"default" choice:"default" choice:"quiet" choice:"group_immediate" description:"Allows to control how the output should be handled."`
 			PositionalArgs struct {
 				Targets []core.AnnotatedOutputLabel `positional-arg-name:"target" description:"Targets to run"`
 			} `positional-args:"true" required:"true"`
@@ -219,10 +223,24 @@ var opts struct {
 			Mount   bool `long:"share_mount" description:"Share mount namespace"`
 		} `group:"Options to override mount and network namespacing on linux, if configured"`
 		Args struct {
-			Target              core.BuildLabel `positional-arg-name:"target" required:"true" description:"Target to execute"`
-			OverrideCommandArgs []string        `positional-arg-name:"override_command" description:"Override command"`
+			Target              core.AnnotatedOutputLabel `positional-arg-name:"target" required:"true" description:"Target to execute"`
+			OverrideCommandArgs []string                  `positional-arg-name:"override_command" description:"Override command"`
 		} `positional-args:"true"`
-	} `command:"exec" description:"Executes a single target in a hermetic build environment"`
+		Sequential struct {
+			Args struct {
+				Targets TargetsOrArgs `positional-arg-name:"target" required:"true" description:"Targets to execute, or arguments to them"`
+			} `positional-args:"true"`
+			Output process.OutputMode `long:"output" default:"default" choice:"default" choice:"quiet" choice:"group_immediate" description:"Controls how output from subprocesses is handled."`
+		} `command:"sequential" description:"Execute a series of targets sequentially"`
+		Parallel struct {
+			NumTasks int `short:"n" long:"num_tasks" default:"10" description:"Maximum number of subtasks to run in parallel"`
+			Args     struct {
+				Targets TargetsOrArgs `positional-arg-name:"target" required:"true" description:"Targets to execute, or arguments to them"`
+			} `positional-args:"true"`
+			Output process.OutputMode `long:"output" default:"default" choice:"default" choice:"quiet" choice:"group_immediate" description:"Controls how output from subprocesses is handled."`
+			Update cli.Duration       `long:"update" default:"10s" description:"Frequency to log updates on running subprocesses. Has no effect for 'default' output mode."`
+		} `command:"parallel" description:"Execute a number of targets in parallel"`
+	} `command:"exec" subcommands-optional:"true" description:"Executes a single target in a hermetic build environment"`
 
 	Clean struct {
 		NoBackground bool     `long:"nobackground" short:"f" description:"Don't fork & detach until clean is finished."`
@@ -267,6 +285,11 @@ var opts struct {
 		} `command:"pleasings" description:"Initialises the pleasings repo"`
 		Pleasew struct {
 		} `command:"pleasew" description:"Initialises the pleasew wrapper script"`
+		Plugin struct {
+			Args struct {
+				Plugins []string `positional-arg-name:"plugin" required:"true" description:"Plugins to install"`
+			} `positional-args:"true"`
+		} `command:"plugin" hidden:"true" description:"Install a plugin and migrate any language-specific config values"`
 	} `command:"init" subcommands-optional:"true" description:"Initialises a .plzconfig file in the current directory"`
 
 	Gc struct {
@@ -345,10 +368,11 @@ var opts struct {
 			} `positional-args:"true"`
 		} `command:"alltargets" description:"Lists all targets in the graph"`
 		Print struct {
-			JSON   bool     `long:"json" description:"Print the targets as json rather than python"`
-			Fields []string `short:"f" long:"field" description:"Individual fields to print of the target"`
-			Labels []string `short:"l" long:"label" description:"Prints all labels with the given prefix (with the prefix stripped off). Overrides --field."`
-			Args   struct {
+			JSON       bool     `long:"json" description:"Print the targets as json rather than python"`
+			OmitHidden bool     `long:"omit_hidden" description:"Omit hidden fields. Can be useful when using wildcard"`
+			Fields     []string `short:"f" long:"field" description:"Individual fields to print of the target"`
+			Labels     []string `short:"l" long:"label" description:"Prints all labels with the given prefix (with the prefix stripped off). Overrides --field."`
+			Args       struct {
 				Targets []core.BuildLabel `positional-arg-name:"targets" description:"Targets to print" required:"true"`
 			} `positional-args:"true" required:"true"`
 		} `command:"print" description:"Prints a representation of a single target"`
@@ -431,7 +455,7 @@ var opts struct {
 }
 
 // Definitions of what we do for each command.
-// Functions are called after args are parsed and return true for success.
+// Functions are called after args are parsed and return a POSIX exit code (0 means success).
 var buildFunctions = map[string]func() int{
 	"build": func() int {
 		success, state := runBuild(opts.Build.Args.Targets, true, false, false)
@@ -439,7 +463,7 @@ var buildFunctions = map[string]func() int{
 	},
 	"hash": func() int {
 		if opts.Hash.Update {
-			opts.FeatureFlags.NoHashVerification = true
+			opts.BehaviorFlags.NoHashVerification = true
 		}
 		success, state := runBuild(opts.Hash.Args.Targets, true, false, false)
 		if success {
@@ -455,8 +479,8 @@ var buildFunctions = map[string]func() int{
 		return toExitCode(success, state)
 	},
 	"test": func() int {
-		targets := testTargets(opts.Test.Args.Target, opts.Test.Args.Args, opts.Test.Failed, opts.Test.TestResultsFile)
-		success, state := doTest(targets, opts.Test.SurefireDir, opts.Test.TestResultsFile)
+		targets, args := testTargets(opts.Test.Args.Target, opts.Test.Args.Args, opts.Test.Failed, opts.Test.TestResultsFile)
+		success, state := doTest(targets, args, opts.Test.SurefireDir, opts.Test.TestResultsFile)
 		return toExitCode(success, state)
 	},
 	"cover": func() int {
@@ -466,9 +490,9 @@ var buildFunctions = map[string]func() int{
 		} else {
 			opts.BuildFlags.Config = "cover"
 		}
-		targets := testTargets(opts.Cover.Args.Target, opts.Cover.Args.Args, opts.Cover.Failed, opts.Cover.TestResultsFile)
+		targets, args := testTargets(opts.Cover.Args.Target, opts.Cover.Args.Args, opts.Cover.Failed, opts.Cover.TestResultsFile)
 		os.RemoveAll(string(opts.Cover.CoverageResultsFile))
-		success, state := doTest(targets, opts.Cover.SurefireDir, opts.Cover.TestResultsFile)
+		success, state := doTest(targets, args, opts.Cover.SurefireDir, opts.Cover.TestResultsFile)
 		test.AddOriginalTargetsToCoverage(state, opts.Cover.IncludeAllFiles)
 		test.RemoveFilesFromCoverage(state.Coverage, state.Config.Cover.ExcludeExtension, state.Config.Cover.ExcludeGlob)
 
@@ -483,7 +507,7 @@ var buildFunctions = map[string]func() int{
 		test.WriteCoverageToFileOrDie(state.Coverage, string(opts.Cover.CoverageResultsFile), stats)
 		test.WriteXMLCoverageToFileOrDie(targets, state.Coverage, string(opts.Cover.CoverageXMLReport))
 
-		if opts.Cover.LineCoverageReport {
+		if opts.Cover.LineCoverageReport && success {
 			output.PrintLineCoverageReport(state, opts.Cover.IncludeFile.AsStrings())
 		} else if !opts.Cover.NoCoverageReport && opts.Cover.Shell == "" {
 			output.PrintCoverage(state, opts.Cover.IncludeFile.AsStrings())
@@ -505,13 +529,14 @@ var buildFunctions = map[string]func() int{
 		return debug.Debug(state, opts.Debug.Args.Target, opts.Debug.Args.Args)
 	},
 	"exec": func() int {
-		success, state := runBuild([]core.BuildLabel{opts.Exec.Args.Target}, true, false, false)
+		success, state := runBuild([]core.BuildLabel{opts.Exec.Args.Target.BuildLabel}, true, false, false)
 		if !success {
 			return toExitCode(success, state)
 		}
 
-		shouldSandbox := state.Graph.TargetOrDie(opts.Exec.Args.Target).Sandbox
-		dir := filepath.Join(core.OutDir, "exec", opts.Exec.Args.Target.Subrepo, opts.Exec.Args.Target.PackageName)
+		target := state.Graph.TargetOrDie(opts.Exec.Args.Target.BuildLabel)
+		dir := target.ExecDir()
+		shouldSandbox := target.Sandbox
 		if code := exec.Exec(state, opts.Exec.Args.Target, dir, nil, opts.Exec.Args.OverrideCommandArgs, false, process.NewSandboxConfig(shouldSandbox && !opts.Exec.Share.Network, shouldSandbox && !opts.Exec.Share.Mount)); code != 0 {
 			return code
 		}
@@ -524,9 +549,31 @@ var buildFunctions = map[string]func() int{
 				log.Fatalf("%v", err)
 			}
 
-			if err := fs.RecursiveLink(from, to, 0644); err != nil {
+			if err := fs.RecursiveLink(from, to); err != nil {
 				log.Fatalf("failed to move output: %v", err)
 			}
+		}
+		return 0
+	},
+	"exec.sequential": func() int {
+		annotated, unannotated, args := opts.Exec.Sequential.Args.Targets.Separate()
+		success, state := runBuild(unannotated, true, false, false)
+		if !success {
+			return toExitCode(success, state)
+		}
+		if code := exec.Sequential(state, opts.Exec.Sequential.Output, annotated, args, opts.Exec.Share.Network, opts.Exec.Share.Mount); code != 0 {
+			return code
+		}
+		return 0
+	},
+	"exec.parallel": func() int {
+		annotated, unannotated, args := opts.Exec.Parallel.Args.Targets.Separate()
+		success, state := runBuild(unannotated, true, false, false)
+		if !success {
+			return toExitCode(success, state)
+		}
+		if code := exec.Parallel(state, opts.Exec.Parallel.Output, time.Duration(opts.Exec.Parallel.Update), annotated, args, opts.Exec.Parallel.NumTasks, opts.Exec.Share.Network, opts.Exec.Share.Mount); code != 0 {
+			return code
 		}
 		return 0
 	},
@@ -566,7 +613,7 @@ var buildFunctions = map[string]func() int{
 			output := opts.Run.Parallel.Output
 			if opts.Run.Parallel.Quiet {
 				log.Warningf("--quiet has been deprecated in favour of --output=quiet and will be removed in v17.")
-				output = run.Quiet
+				output = process.Quiet
 			}
 			os.Exit(run.Parallel(context.Background(), state, ls, opts.Run.Parallel.Args.AsStrings(), opts.Run.Parallel.NumTasks, output, opts.Run.Remote, opts.Run.Env, opts.Run.Parallel.Detach, opts.Run.InTempDir, dir))
 		}
@@ -581,9 +628,14 @@ var buildFunctions = map[string]func() int{
 				log.Warningf("--in_wd is deprecated in favour of --wd=. and will be removed in v17.")
 				dir = originalWorkingDirectory
 			}
+			output := opts.Run.Sequential.Output
+			if opts.Run.Sequential.Quiet {
+				log.Warningf("--quiet has been deprecated in favour of --output=quiet and will be removed in v17.")
+				output = process.Quiet
+			}
 
 			ls := state.ExpandOriginalMaybeAnnotatedLabels(opts.Run.Sequential.PositionalArgs.Targets)
-			os.Exit(run.Sequential(state, ls, opts.Run.Sequential.Args.AsStrings(), opts.Run.Sequential.Quiet, opts.Run.Remote, opts.Run.Env, opts.Run.InTempDir, dir))
+			os.Exit(run.Sequential(state, ls, opts.Run.Sequential.Args.AsStrings(), output, opts.Run.Remote, opts.Run.Env, opts.Run.InTempDir, dir))
 		}
 		return 1
 	},
@@ -628,9 +680,12 @@ var buildFunctions = map[string]func() int{
 		return toExitCode(success, state)
 	},
 	"format": func() int {
+		if opts.Format.Quiet && opts.Format.Write {
+			log.Fatal("Can't use both --quiet and --write at the same time")
+		}
 		if changed, err := format.Format(config, opts.Format.Args.Files.AsStrings(), opts.Format.Write, opts.Format.Quiet); err != nil {
 			log.Fatalf("Failed to reformat files: %s", err)
-		} else if changed && !opts.Format.Write {
+		} else if changed && opts.Format.Quiet {
 			return 1
 		}
 		return 0
@@ -667,6 +722,10 @@ var buildFunctions = map[string]func() int{
 	},
 	"init.pleasew": func() int {
 		plzinit.InitWrapperScript()
+		return 0
+	},
+	"init.plugin": func() int {
+		plzinit.InitPlugins(opts.Init.Plugin.Args.Plugins)
 		return 0
 	},
 	"export": func() int {
@@ -717,7 +776,7 @@ var buildFunctions = map[string]func() int{
 	},
 	"query.print": func() int {
 		return runQuery(false, opts.Query.Print.Args.Targets, func(state *core.BuildState) {
-			query.Print(state, state.ExpandOriginalLabels(), opts.Query.Print.Fields, opts.Query.Print.Labels, opts.Query.Print.JSON)
+			query.Print(state, state.ExpandOriginalLabels(), opts.Query.Print.Fields, opts.Query.Print.Labels, opts.Query.Print.OmitHidden, opts.Query.Print.JSON)
 		})
 	},
 	"query.input": func() int {
@@ -840,8 +899,9 @@ var buildFunctions = map[string]func() int{
 		} else if opts.Query.Changes.Inexact {
 			return runInexact(scm.ChangedFiles(opts.Query.Changes.Since, true, ""))
 		}
-		original := scm.CurrentRevIdentifier()
+		original := scm.CurrentRevIdentifier(false)
 		files := scm.ChangedFiles(opts.Query.Changes.Since, true, "")
+		log.Debugf("Number of changed files: %d", len(files))
 		if err := scm.Checkout(opts.Query.Changes.Since); err != nil {
 			log.Fatalf("%s", err)
 		}
@@ -995,10 +1055,11 @@ func runQuery(needFullParse bool, labels []core.BuildLabel, onSuccess func(state
 	return 1
 }
 
-func doTest(targets []core.BuildLabel, surefireDir cli.Filepath, resultsFile cli.Filepath) (bool, *core.BuildState) {
+func doTest(targets []core.BuildLabel, args []string, surefireDir cli.Filepath, resultsFile cli.Filepath) (bool, *core.BuildState) {
 	os.RemoveAll(string(surefireDir))
 	os.RemoveAll(string(resultsFile))
 	os.MkdirAll(string(surefireDir), core.DirPermissions)
+	opts.Test.StateArgs = args
 	success, state := runBuild(targets, true, true, false)
 	test.CopySurefireXMLFilesToDir(state, string(surefireDir))
 	test.WriteResultsToFileOrDie(state.Graph, string(resultsFile), state.Config.Test.StoreTestOutputOnSuccess)
@@ -1027,25 +1088,25 @@ func Please(targets []core.BuildLabel, config *core.Configuration, shouldBuild, 
 		config.Build.Config = "dbg"
 	}
 	state := core.NewBuildState(config)
-	state.VerifyHashes = !opts.FeatureFlags.NoHashVerification
+	state.VerifyHashes = !opts.BehaviorFlags.NoHashVerification
 	// Only one of these two can be passed
 	state.NumTestRuns = uint16(opts.Test.NumRuns)
 	if opts.Cover.NumRuns > opts.Test.NumRuns {
 		state.NumTestRuns = uint16(opts.Cover.NumRuns)
 	}
 	state.TestSequentially = opts.Test.Sequentially || opts.Cover.Sequentially // Similarly here.
-	state.TestArgs = append(opts.Test.Args.Args, opts.Cover.Args.Args...)      // And here
+	state.TestArgs = opts.Test.StateArgs
 	state.NeedCoverage = opts.Cover.active
 	state.NeedBuild = shouldBuild
 	state.NeedTests = shouldTest
-	state.NeedRun = !opts.Run.Args.Target.IsEmpty() || len(opts.Run.Parallel.PositionalArgs.Targets) > 0 || len(opts.Run.Sequential.PositionalArgs.Targets) > 0 || !opts.Exec.Args.Target.IsEmpty() || opts.Tool.Args.Tool != "" || debug
+	state.NeedRun = !opts.Run.Args.Target.IsEmpty() || len(opts.Run.Parallel.PositionalArgs.Targets) > 0 || len(opts.Run.Sequential.PositionalArgs.Targets) > 0 || !opts.Exec.Args.Target.IsEmpty() || len(opts.Exec.Sequential.Args.Targets) > 0 || len(opts.Exec.Parallel.Args.Targets) > 0 || opts.Tool.Args.Tool != "" || debug
 	state.NeedHashesOnly = len(opts.Hash.Args.Targets) > 0
 	if opts.Build.Prepare {
 		log.Warningf("--prepare has been deprecated in favour of --shell and will be removed in v17.")
 	}
 	state.PrepareOnly = opts.Build.Prepare || opts.Build.Shell != "" || opts.Test.Shell != "" || opts.Cover.Shell != ""
 	state.Watch = len(opts.Watch.Args.Targets) > 0
-	state.CleanWorkdirs = !opts.FeatureFlags.KeepWorkdirs
+	state.CleanWorkdirs = !opts.BehaviorFlags.KeepWorkdirs
 	state.ForceRebuild = opts.Build.Rebuild || opts.Run.Rebuild
 	state.ForceRerun = opts.Test.Rerun || opts.Cover.Rerun
 	state.ShowTestOutput = opts.Test.ShowOutput || opts.Cover.ShowOutput
@@ -1053,7 +1114,15 @@ func Please(targets []core.BuildLabel, config *core.Configuration, shouldBuild, 
 	state.DebugFailingTests = debugFailingTests
 	state.ShowAllOutput = opts.OutputFlags.ShowAllOutput
 	state.ParsePackageOnly = opts.ParsePackageOnly
-	state.DownloadOutputs = (!opts.Build.NoDownload && !opts.Run.Remote && len(targets) > 0 && (!targets[0].IsAllSubpackages() || len(opts.BuildFlags.Include) > 0)) || opts.Build.Download
+	state.EnableBreakpoints = opts.BehaviorFlags.Debug
+
+	// What outputs get downloaded in remote execution.
+	if debug {
+		state.OutputDownload = core.TransitiveOutputDownload
+	} else if (!opts.Build.NoDownload && !opts.Run.Remote && len(targets) > 0 && (!targets[0].IsAllSubpackages() || len(opts.BuildFlags.Include) > 0)) || opts.Build.Download {
+		state.OutputDownload = core.OriginalOutputDownload
+	}
+
 	state.SetIncludeAndExclude(opts.BuildFlags.Include, opts.BuildFlags.Exclude)
 	if opts.BuildFlags.Arch.OS != "" {
 		state.TargetArch = opts.BuildFlags.Arch
@@ -1076,7 +1145,8 @@ func Please(targets []core.BuildLabel, config *core.Configuration, shouldBuild, 
 	if state.RemoteClient != nil && !opts.Run.Remote {
 		defer state.RemoteClient.Disconnect()
 	}
-	return state.Successful(), state
+	failures, _, _ := state.Failures()
+	return !failures, state
 }
 
 func runPlease(state *core.BuildState, targets []core.BuildLabel) {
@@ -1096,7 +1166,7 @@ func runPlease(state *core.BuildState, targets []core.BuildLabel) {
 	streamTests := opts.Test.StreamResults || opts.Cover.StreamResults
 	shell := opts.Build.Shell != "" || opts.Test.Shell != "" || opts.Cover.Shell != ""
 	shellRun := opts.Build.Shell == "run" || opts.Test.Shell == "run" || opts.Cover.Shell == "run"
-	pretty := prettyOutput(opts.OutputFlags.InteractiveOutput, opts.OutputFlags.PlainOutput, opts.OutputFlags.Verbosity) && state.NeedBuild && !streamTests
+	pretty := prettyOutput(opts.OutputFlags.InteractiveOutput, opts.OutputFlags.PlainOutput || opts.BehaviorFlags.Debug, opts.OutputFlags.Verbosity) && state.NeedBuild && !streamTests
 	state.Cache = cache.NewCache(state)
 
 	// Run the display
@@ -1115,21 +1185,61 @@ func runPlease(state *core.BuildState, targets []core.BuildLabel) {
 // target with a list of trailing arguments.
 // Alternatively they can be completely omitted in which case we test everything under the working dir.
 // One can also pass a 'failed' flag which runs the failed tests from last time.
-func testTargets(target core.BuildLabel, args []string, failed bool, resultsFile cli.Filepath) []core.BuildLabel {
+func testTargets(target core.BuildLabel, inputs TargetsOrArgs, failed bool, resultsFile cli.Filepath) ([]core.BuildLabel, []string) {
 	if failed {
-		targets, args := test.LoadPreviousFailures(string(resultsFile))
-		// Have to reset these - it doesn't matter which gets which.
-		opts.Test.Args.Args = args
-		opts.Cover.Args.Args = nil
-		return targets
+		return test.LoadPreviousFailures(string(resultsFile))
 	} else if target.Name == "" {
-		return core.InitialPackage()
-	} else if len(args) > 0 && core.LooksLikeABuildLabel(args[0]) {
-		opts.Cover.Args.Args = []string{}
-		opts.Test.Args.Args = []string{}
-		return append(core.ParseBuildLabels(args), target)
+		return core.InitialPackage(), nil
 	}
-	return []core.BuildLabel{target}
+	labels, args := inputs.SeparateUnannotated()
+	return append([]core.BuildLabel{target}, labels...), args
+}
+
+type TargetOrArg struct {
+	arg   string
+	label core.AnnotatedOutputLabel
+}
+
+func (arg TargetOrArg) Complete(match string) []flags.Completion {
+	if core.LooksLikeABuildLabel(match) {
+		var l core.BuildLabel
+		return l.Complete(match)
+	}
+	return nil
+}
+
+func (arg *TargetOrArg) UnmarshalFlag(value string) error {
+	if core.LooksLikeABuildLabel(value) {
+		return arg.label.UnmarshalFlag(value)
+	}
+	arg.arg = value
+	return nil
+}
+
+type TargetsOrArgs []TargetOrArg
+
+// Separate splits the targets & arguments into the labels (in both annotated & unannotated forms) and the arguments.
+func (l TargetsOrArgs) Separate() (annotated []core.AnnotatedOutputLabel, unannotated []core.BuildLabel, args []string) {
+	for _, arg := range l {
+		if l, _ := arg.label.Label(); l.IsEmpty() {
+			args = append(args, arg.arg)
+		} else {
+			annotated = append(annotated, arg.label)
+			unannotated = append(unannotated, arg.label.BuildLabel)
+		}
+	}
+	return
+}
+
+// SeparateUnannotated splits the targets & arguments into two slices. Annotations aren't permitted.
+func (l TargetsOrArgs) SeparateUnannotated() ([]core.BuildLabel, []string) {
+	annotated, unannotated, args := l.Separate()
+	for _, a := range annotated {
+		if a.Annotation != "" {
+			log.Fatalf("Invalid build label; annotations are not permitted here: %s", a)
+		}
+	}
+	return unannotated, args
 }
 
 // readConfig reads the initial configuration files
@@ -1140,8 +1250,8 @@ func readConfig() *core.Configuration {
 	} else if err := cfg.ApplyOverrides(opts.BuildFlags.Option); err != nil {
 		log.Fatalf("Can't override requested config setting: %s", err)
 	}
-	if opts.FeatureFlags.HTTPProxy != "" {
-		cfg.Build.HTTPProxy = opts.FeatureFlags.HTTPProxy
+	if opts.BehaviorFlags.HTTPProxy != "" {
+		cfg.Build.HTTPProxy = opts.BehaviorFlags.HTTPProxy
 	}
 	config = cfg
 	return cfg
@@ -1205,7 +1315,7 @@ func mustReadConfigAndSetRoot(forceUpdate bool) *core.Configuration {
 		}
 		cli.InitFileLogging(string(opts.OutputFlags.LogFile), opts.OutputFlags.LogFileLevel, opts.OutputFlags.LogAppend)
 	}
-	if opts.FeatureFlags.NoHashVerification {
+	if opts.BehaviorFlags.NoHashVerification {
 		log.Warning("You've disabled hash verification; this is intended to help temporarily while modifying build targets. You shouldn't use this regularly.")
 	}
 	config := readConfig()
@@ -1216,15 +1326,15 @@ func mustReadConfigAndSetRoot(forceUpdate bool) *core.Configuration {
 	} else if opts.Update.Version.IsSet {
 		config.Please.Version = opts.Update.Version
 	}
-	update.CheckAndUpdate(config, !opts.FeatureFlags.NoUpdate, forceUpdate, opts.Update.Force, !opts.Update.NoVerify, !opts.OutputFlags.PlainOutput, opts.Update.LatestPrerelease)
+	update.CheckAndUpdate(config, !opts.BehaviorFlags.NoUpdate, forceUpdate, opts.Update.Force, !opts.Update.NoVerify, !opts.OutputFlags.PlainOutput, opts.Update.LatestPrerelease)
 	return config
 }
 
 // handleCompletions handles shell completion. Typically it just prints to stdout but
 // may do a little more if we think we need to handle aliases.
 func handleCompletions(parser *flags.Parser, items []flags.Completion) {
-	cli.InitLogging(cli.MinVerbosity) // Ensure this is quiet
-	opts.FeatureFlags.NoUpdate = true // Ensure we don't try to update
+	cli.InitLogging(cli.MinVerbosity)  // Ensure this is quiet
+	opts.BehaviorFlags.NoUpdate = true // Ensure we don't try to update
 	if len(items) > 0 && items[0].Description == "BuildLabel" {
 		// Don't muck around with the config if we're predicting build labels.
 		cli.PrintCompletions(items)
@@ -1323,7 +1433,11 @@ func initBuild(args []string) string {
 	// can affect how we parse otherwise illegal flag combinations.
 	if (flagsErr != nil || len(extraArgs) > 0) && command != "query.completions" {
 		args := config.UpdateArgsWithAliases(os.Args)
-		command = cli.ParseFlagsFromArgsOrDie("Please", &opts, args, additionalUsageInfo)
+		parser, _, err := cli.ParseFlags("Please", &opts, args, flags.PassDoubleDash, handleCompletions, additionalUsageInfo)
+		if err != nil {
+			log.Fatalf("%s", err)
+		}
+		command = cli.ActiveFullCommand(parser.Command)
 	}
 
 	if opts.ProfilePort != 0 {
@@ -1374,9 +1488,9 @@ func toExitCode(success bool, state *core.BuildState) int {
 		return 0
 	} else if state == nil {
 		return 1
-	} else if state.BuildFailed {
+	} else if _, buildFailed, testFailed := state.Failures(); buildFailed {
 		return 2
-	} else if state.TestFailed {
+	} else if testFailed {
 		if opts.Test.FailingTestsOk || opts.Cover.FailingTestsOk {
 			return 0
 		}
@@ -1423,6 +1537,8 @@ func execute(command string) int {
 		}()
 	}
 	defer worker.StopAll()
+
+	log.Debugf("plz %v", command)
 	return buildFunctions[command]()
 }
 

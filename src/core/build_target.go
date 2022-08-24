@@ -17,16 +17,19 @@ import (
 )
 
 // OutDir is the root output directory for everything.
-const OutDir string = "plz-out"
+const OutDir = "plz-out"
 
 // TmpDir is the root of the temporary directory for building targets & running tests.
-const TmpDir string = "plz-out/tmp"
+const TmpDir = "plz-out/tmp"
 
 // GenDir is the output directory for non-binary targets.
-const GenDir string = "plz-out/gen"
+const GenDir = "plz-out/gen"
 
 // BinDir is the output directory for binary targets.
-const BinDir string = "plz-out/bin"
+const BinDir = "plz-out/bin"
+
+// ExecDir is the output directory that we execute in.
+const ExecDir = "plz-out/exec"
 
 // SubrepoDir is the output directory for targets that define subrepos.
 const SubrepoDir = "plz-out/subrepos"
@@ -48,11 +51,6 @@ const TestResultsFile = "test.results"
 // CoverageFile is the file that targets output coverage information into.
 // This is similarly defined via an environment variable.
 const CoverageFile = "test.coverage"
-
-// TestResultsDirLabel is a known label that indicates that the test will output results
-// into a directory rather than a file. Please can internally handle either but the remote
-// execution API requires that we specify which is which.
-const TestResultsDirLabel = "test_results_dir"
 
 // tempOutputSuffix is the suffix we attach to temporary outputs to avoid name clashes.
 const tempOutputSuffix = ".out"
@@ -122,11 +120,11 @@ type BuildTarget struct {
 	// Data files of this rule by name.
 	NamedData map[string][]BuildInput `name:"data"`
 	// Output files of this rule. All are paths relative to this package.
-	outputs []string `name:"outs"`
+	outputs []string `name:"outs" hide:"filegroup"`
 	// Named output subsets of this rule. All are paths relative to this package but can be
 	// captured separately; for example something producing C code might separate its outputs
 	// into sources and headers.
-	namedOutputs map[string][]string `name:"outs"`
+	namedOutputs map[string][]string `name:"outs" hide:"filegroup"`
 	// Optional output files of this rule. Same as outs but aren't required to be produced always.
 	// Can be glob patterns.
 	OptionalOutputs []string `name:"optional_outs"`
@@ -142,6 +140,8 @@ type BuildTarget struct {
 	Debug *DebugFields
 	// If ShowProgress is true, this is used to store the current progress of the target.
 	Progress float32 `print:"false"`
+	// For remote_files, this is the total size of the download (if known)
+	FileSize uint64 `print:"false"`
 	// Description displayed while the command is building.
 	// Default is just "Building" but it can be customised.
 	BuildingDescription string `name:"building_description"`
@@ -198,6 +198,9 @@ type BuildTarget struct {
 	FileContent string `name:"content"`
 	// Represents the state of this build target (see below)
 	state int32 `print:"false"`
+	// If true, the target is needed for a subinclude and therefore we will have to make sure its
+	// outputs are available locally when built.
+	neededForSubinclude atomicBool `print:"false"`
 	// The number of completed runs
 	completedRuns uint16 `print:"false"`
 	// True if this target is a binary (ie. runnable, will appear in plz-out/bin)
@@ -226,9 +229,6 @@ type BuildTarget struct {
 	// If true, the executed commands will exit whenever an error is encountered (i.e. shells
 	// are executed with -e).
 	ExitOnError bool
-	// If true, the target is needed for a subinclude and therefore we will have to make sure its
-	// outputs are available locally when built.
-	NeededForSubinclude bool `print:"false"`
 	// Marks the target as a filegroup.
 	IsFilegroup bool `print:"false"`
 	// Marks the target as a remote_file.
@@ -239,7 +239,7 @@ type BuildTarget struct {
 	AddedPostBuild bool `print:"false"`
 	// If true, the interactive progress display will try to infer the target's progress
 	// via some heuristics on its output.
-	ShowProgress bool `name:"progress"`
+	ShowProgress atomicBool `name:"progress"`
 }
 
 // BuildMetadata is temporary metadata that's stored around a build target - we don't
@@ -395,6 +395,12 @@ func (target *BuildTarget) OutDir() string {
 		return path.Join(BinDir, target.Label.Subrepo, target.Label.PackageName)
 	}
 	return path.Join(GenDir, target.Label.Subrepo, target.Label.PackageName)
+}
+
+// ExecDir returns the exec directory for this target, e.g.
+// //mickey/donald:goofy -> plz-out/exec/mickey/donald/goofy
+func (target *BuildTarget) ExecDir() string {
+	return path.Join(ExecDir, target.Label.Subrepo, target.Label.PackageName, target.Label.Name)
 }
 
 // TestDir returns the test directory for this target, eg.
@@ -1172,6 +1178,11 @@ func (target *BuildTarget) UnprefixedHashes() []string {
 	return hashes
 }
 
+// HashLastModified is whether we should hash the last modified times for this target
+func (target *BuildTarget) HashLastModified() bool {
+	return target.IsFilegroup && target.HasLabel("fg:hash-modified-time")
+}
+
 // AddSource adds a source to the build target, deduplicating against existing entries.
 func (target *BuildTarget) AddSource(source BuildInput) {
 	target.Sources = target.addSource(target.Sources, source)
@@ -1728,7 +1739,7 @@ func (target *BuildTarget) HasParent() bool {
 // ShouldShowProgress returns true if the target should display progress.
 // This is provided as a function to satisfy the process package.
 func (target *BuildTarget) ShouldShowProgress() bool {
-	return target.ShowProgress
+	return target.ShowProgress.Value()
 }
 
 // ProgressDescription returns a description of what the target is doing as it runs.
@@ -1764,6 +1775,20 @@ func (target *BuildTarget) AddOutputDirectory(dir string) {
 // GetFileContent returns the file content, expanding it if it needs to
 func (target *BuildTarget) GetFileContent(state *BuildState) (string, error) {
 	return ReplaceSequences(state, target, target.FileContent)
+}
+
+// HasLinks returns true if the outputs are meant to be linked somewhere (i.e. via symlinks).
+// This check is useful in deciding whether this target should be downloaded during remote execution or not.
+func (target *BuildTarget) HasLinks(state *BuildState) bool {
+	for _, prefix := range []string{"link:", "hlink:", "dlink:", "dhlink:"} {
+		if labels := target.PrefixedLabels(prefix); len(labels) > 0 {
+			return true
+		}
+	}
+	if state.Config.ShouldLinkGeneratedSources() && target.HasLabel("codegen") {
+		return true
+	}
+	return false
 }
 
 // BuildTargets makes a slice of build targets sortable by their labels.

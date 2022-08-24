@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alessio/shellescape"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/command"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/filemetadata"
@@ -19,6 +20,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 
+	"github.com/thought-machine/please/src/build"
 	"github.com/thought-machine/please/src/core"
 	"github.com/thought-machine/please/src/fs"
 	"github.com/thought-machine/please/src/process"
@@ -89,8 +91,15 @@ func (c *Client) buildCommand(target *core.BuildTarget, inputRoot *pb.Directory,
 	var commandPrefix = "export TMP_DIR=\"`pwd`\" && export HOME=$TMP_DIR && "
 
 	// Similarly, we need to export these so that things like $TMP_DIR get expanded correctly.
-	for k, v := range target.Env {
-		commandPrefix += fmt.Sprintf("export %s=\"%s\" && ", k, v)
+	if len(target.Env) > 0 {
+		keys := make([]string, 0, len(target.Env))
+		for k := range target.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			commandPrefix += fmt.Sprintf("export %s=%s && ", k, shellescape.Quote(target.Env[k]))
+		}
 	}
 
 	outs := target.AllOutputs()
@@ -105,7 +114,8 @@ func (c *Client) buildCommand(target *core.BuildTarget, inputRoot *pb.Directory,
 			Arguments: []string{
 				"fetch", strings.Join(target.AllURLs(state), " "), "verify", strings.Join(target.Hashes, " "),
 			},
-			OutputPaths: outs,
+			EnvironmentVariables: c.buildEnv(target, []string{}, false),
+			OutputPaths:          outs,
 		}, nil
 	}
 	cmd := target.GetCommand(state)
@@ -116,36 +126,30 @@ func (c *Client) buildCommand(target *core.BuildTarget, inputRoot *pb.Directory,
 	return &pb.Command{
 		Platform:             c.targetPlatformProperties(target),
 		Arguments:            process.BashCommand(c.shellPath, commandPrefix+cmd, state.Config.Build.ExitOnError),
-		EnvironmentVariables: c.buildEnv(target, c.stampedBuildEnvironment(state, target, inputRoot, stamp), target.Sandbox),
+		EnvironmentVariables: c.buildEnv(target, c.stampedBuildEnvironment(state, target, inputRoot, stamp, isTest || isRun), target.Sandbox),
 		OutputPaths:          outs,
 	}, err
 }
 
 // stampedBuildEnvironment returns a build environment, optionally with a stamp if stamp is true.
-func (c *Client) stampedBuildEnvironment(state *core.BuildState, target *core.BuildTarget, inputRoot *pb.Directory, stamp bool) []string {
+func (c *Client) stampedBuildEnvironment(state *core.BuildState, target *core.BuildTarget, inputRoot *pb.Directory, stamp, isRuntime bool) []string {
 	if target.IsFilegroup {
 		return core.GeneralBuildEnvironment(state) // filegroups don't need a full build environment
 	}
 	// We generate the stamp ourselves from the input root.
 	// TODO(peterebden): it should include the target properties too...
-	hash := c.sum(mustMarshal(inputRoot))
+	hash := c.sum(append(mustMarshal(inputRoot), build.RuleHash(state, target, isRuntime, false)...))
 	return core.StampedBuildEnvironment(state, target, hash, ".", stamp && target.Stamp)
 }
 
 // buildTestCommand builds a command for a target when testing.
 func (c *Client) buildTestCommand(state *core.BuildState, target *core.BuildTarget) (*pb.Command, error) {
-	// TODO(peterebden): Remove all this nonsense once API v2.1 is released.
-	files := target.Test.Outputs
-	dirs := []string{}
+	paths := target.Test.Outputs
 	if target.NeedCoverage(state) {
-		files = append(files, core.CoverageFile)
+		paths = append(paths, core.CoverageFile)
 	}
 	if !target.Test.NoOutput {
-		if target.HasLabel(core.TestResultsDirLabel) {
-			dirs = []string{core.TestResultsFile}
-		} else {
-			files = append(files, core.TestResultsFile)
-		}
+		paths = append(paths, core.TestResultsFile)
 	}
 	commandPrefix := "export TMP_DIR=\"`pwd`\" TEST_DIR=\"`pwd`\" && "
 	if outs := target.Outputs(); len(outs) > 0 {
@@ -166,9 +170,7 @@ func (c *Client) buildTestCommand(state *core.BuildState, target *core.BuildTarg
 		},
 		Arguments:            process.BashCommand(c.shellPath, commandPrefix+cmd, state.Config.Build.ExitOnError),
 		EnvironmentVariables: c.buildEnv(nil, core.TestEnvironment(state, target, "."), target.Test.Sandbox),
-		OutputFiles:          files,
-		OutputDirectories:    dirs,
-		OutputPaths:          append(files, dirs...),
+		OutputPaths:          paths,
 	}, err
 }
 
@@ -323,7 +325,7 @@ func (c *Client) uploadInput(b *dirBuilder, ch chan<- *uploadinfo.Entry, input c
 				})
 				return nil
 			}
-			h, err := c.state.PathHasher.Hash(name, false, true)
+			h, err := c.state.PathHasher.Hash(name, false, true, false)
 			if err != nil {
 				return err
 			}

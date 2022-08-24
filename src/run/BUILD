@@ -4,12 +4,12 @@ go_library(
     visibility = ["PUBLIC"],
     deps = [
         "//src/cli",
+        "//src/cli/logging",
         "//src/core",
         "//src/fs",
         "//src/output",
         "//src/process",
         "//third_party/go:errgroup",
-        "//third_party/go:logging",
     ],
 )
 
@@ -19,6 +19,7 @@ go_test(
     data = ["test_data"],
     deps = [
         ":run",
+        "//src/process",
         "//third_party/go:testify",
     ],
 )

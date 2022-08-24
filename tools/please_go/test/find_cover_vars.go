@@ -4,12 +4,13 @@ package test
 import (
 	"fmt"
 	"go/build"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 )
+
+var dontCollapseImportPaths = os.Getenv("FF_GO_DONT_COLLAPSE_IMPORT_PATHS")
 
 // A CoverVar is just a combination of package path and variable name
 // for one of the templated-in coverage variables.
@@ -67,10 +68,14 @@ func findCoverVars(filepath, importPath, testPackage string, external bool, srcs
 	if !external && dir == os.Getenv("PKG_DIR") {
 		packagePath = testPackage
 	} else if dir != "." {
-		packagePath = collapseFinalDir(strings.TrimSuffix(filepath, ".a"), importPath)
+		if dontCollapseImportPaths != "" {
+			packagePath = toImportPath(dir, importPath)
+		} else {
+			packagePath = collapseFinalDir(strings.TrimSuffix(filepath, ".a"), importPath)
+		}
 	}
 
-	fi, err := ioutil.ReadDir(dir)
+	fi, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -114,6 +119,7 @@ func coverVar(dir, importPath, v string) CoverVar {
 	}
 }
 
+// TODO(jpoole): delete this once v17 is released
 // collapseFinalDir mimics what go does with import paths; if the final two components of
 // the given path are the same (eg. "src/core/core") it collapses them into one ("src/core")
 // Also if importPath is empty then it trims a leading src/
@@ -121,10 +127,16 @@ func collapseFinalDir(s, importPath string) string {
 	if importPath == "" {
 		s = strings.TrimPrefix(s, "src/")
 	}
-	// TODO(jpoole): the import path should always be the path to the dir and doesn't depend on the archive name.
-	// 	 remove this in v17
 	if path.Base(path.Dir(s)) == path.Base(s) {
 		s = path.Dir(s)
 	}
 	return filepath.Join(importPath, s)
+}
+
+// toImportPath converts a package directory path e.g. src/foo/bar to the import path for that package.
+func toImportPath(s, modulePath string) string {
+	if modulePath == "" {
+		s = strings.TrimPrefix(s, "src/")
+	}
+	return filepath.Join(modulePath, s)
 }

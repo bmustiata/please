@@ -3,13 +3,12 @@ package(default_visibility = ["PUBLIC"])
 go_toolchain(
     name = "toolchain",
     hashes = [
-        "da4e3e3c194bf9eed081de8842a157120ef44a7a8d7c820201adae7b0e28b20b",  # darwin_arm64
-        "355bd544ce08d7d484d9d7de05a71b5c6f5bc10aa4b316688c2192aeb3dacfd1",  # darwin_amd64
-        "6bf89fc4f5ad763871cf7eac80a2d594492de7a818303283f1366a7f6a30372d",  # linux_amd64
-        "15c184c83d99441d719da201b26256455eee85a808747c404b4183e9aa6c64b4",  # freebsd_amd64
+        "df6509885f65f0d7a4eaf3dfbe7dda327569787e8a0a31cbf99ae3a6e23e9ea8",  # darwin_amd64
+        "859e0a54b7fcea89d9dd1ec52aab415ac8f169999e5fdfb0f0c15b577c4ead5e",  # darwin_arm64
+        "eca1a8f7b6ff6146efc285eed581096b12b59c1f0488bfe98ed053ab205267ca",  # freebsd_amd64
+        "464b6b66591f6cf055bc5df90a9750bf5fbc9d038722bb84a9d56a2bea974be6",  # linux_amd64
     ],
-    strip_srcs = CONFIG.BUILD_CONFIG != "dbg",
-    version = "1.17",
+    version = "1.19",
 )
 
 go_module(
@@ -17,7 +16,14 @@ go_module(
     licences = ["BSD-3-Clause"],
     module = "gopkg.in/op/go-logging.v1",
     version = "v1.0.0-20160211212156-b2cb9fa56473",
-    visibility = ["PUBLIC"],
+    visibility = [
+        "//src/build:build_step_test",
+        "//src/cli/...",
+        "//src/parse/asp:asp_test",
+        "//src/update:update_test",
+        "//test/...",
+        "//tools/...",
+    ],
 )
 
 go_module(
@@ -32,7 +38,6 @@ go_module(
     licences = ["BSD-3-Clause"],
     module = "golang.org/x/crypto",
     version = "v0.0.0-20210920023735-84f357641f63",
-    visibility = ["PUBLIC"],
     deps = [":xterm"],
 )
 
@@ -84,7 +89,7 @@ go_module(
         "...",
     ],
     module = "github.com/please-build/gcfg",
-    version = "v1.6.0",
+    version = "9b4d14cddd6148920e11c8bb7ee19369473b1019",
     deps = [
         ":warnings",
     ],
@@ -103,7 +108,7 @@ go_module(
     name = "go-flags",
     licences = ["BSD-3-Clause"],
     module = "github.com/thought-machine/go-flags",
-    version = "v1.6.0",
+    version = "v1.6.2",
     visibility = ["PUBLIC"],
     deps = [":xsys"],
 )
@@ -498,7 +503,7 @@ go_module(
     ],
     licences = ["BSD-3-Clause"],
     module = "golang.org/x/sync",
-    version = "v0.0.0-20210220032951-036812b2e83c",
+    version = "v0.0.0-20220722155255-886fb9371eb4",
     visibility = ["PUBLIC"],
 )
 
@@ -511,7 +516,7 @@ go_module(
     ],
     licences = ["BSD-3-Clause"],
     module = "github.com/shirou/gopsutil/v3",
-    version = "v3.21.8",
+    version = "v3.22.6",
     visibility = ["PUBLIC"],
     deps = [
         ":sysconf",
@@ -544,7 +549,7 @@ go_module(
     name = "xsys",
     install = ["..."],
     module = "golang.org/x/sys",
-    version = "v0.0.0-20210823070655-63515b42dcdf",
+    version = "v0.0.0-20220315194320-039c03cc5b86",
 )
 
 go_module(
@@ -856,15 +861,6 @@ go_module(
 )
 
 go_module(
-    name = "cmap",
-    install = [
-        "...",
-    ],
-    module = "github.com/OneOfOne/cmap",
-    version = "ccaef7657ab896465978ddf580830288b61f9f6e",
-)
-
-go_module(
     name = "csslex",
     module = "github.com/x1ddos/csslex",
     version = "v0.0.0-20160125172232-7894d8ab8bfe",
@@ -1076,5 +1072,13 @@ go_module(
     install = ["semver"],
     module = "golang.org/x/mod",
     version = "v0.5.0",
+    visibility = ["PUBLIC"],
+)
+
+go_module(
+    name = "shellescape",
+    licences = ["MIT"],
+    module = "github.com/alessio/shellescape",
+    version = "v1.4.1",
     visibility = ["PUBLIC"],
 )

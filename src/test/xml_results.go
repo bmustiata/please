@@ -7,14 +7,12 @@ import (
 	"compress/gzip"
 	"encoding/xml"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"path"
 	"strconv"
 	"time"
-
-	"io"
 
 	"github.com/thought-machine/please/src/core"
 )
@@ -418,7 +416,7 @@ type unitTestXMLFailure struct {
 func WriteResultsToFileOrDie(graph *core.BuildGraph, filename string, storeOutputOnSuccess bool) {
 	if err := os.MkdirAll(path.Dir(filename), core.DirPermissions); err != nil {
 		log.Fatalf("Failed to create directory for test output")
-	} else if err = ioutil.WriteFile(filename, mustSerialiseResults(graph, storeOutputOnSuccess), 0644); err != nil {
+	} else if err = os.WriteFile(filename, mustSerialiseResults(graph, storeOutputOnSuccess), 0644); err != nil {
 		log.Fatalf("Failed to write XML to %s: %s", filename, err)
 	}
 }

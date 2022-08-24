@@ -63,7 +63,7 @@ go_test_main(
     name = "test_main",
     srcs = ["main_test.go"],
     test_only = True,
-    test_package = "github.com/thought-machine/please/test/go_rules/whatever",
+    test_package = "github.com/thought-machine/please/test/go_rules",
 )
 
 go_binary(
@@ -77,17 +77,4 @@ gentest(
     name = "test_main_test",
     data = [":test_main_bin"],
     test_cmd = "$DATA | tee $RESULTS_FILE",
-)
-
-go_library(
-    name = "package_test_lib",
-    srcs = ["package_lib.go"],
-    package = "package_lib",
-)
-
-go_test(
-    name = "package_test",
-    srcs = ["package_test.go"],
-    external = True,
-    deps = [":package_test_lib"],
 )

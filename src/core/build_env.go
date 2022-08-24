@@ -28,10 +28,12 @@ func GeneralBuildEnvironment(state *BuildState) BuildEnv {
 		// These are slightly modified forms that are more convenient for some things.
 		"XARCH=" + state.Arch.XArch(),
 		"XOS=" + state.Arch.XOS(),
-		// It's easier to just make these available for Go-based rules.
-		"GOARCH=" + state.Arch.GoArch(),
-		"GOOS=" + state.Arch.OS,
 	}
+
+	if !state.Config.FeatureFlags.ExcludeGoRules {
+		env = append(env, "GOARCH="+state.Arch.GoArch(), "GOOS="+state.Arch.OS)
+	}
+
 	if state.Config.Cpp.PkgConfigPath != "" {
 		env = append(env, "PKG_CONFIG_PATH="+state.Config.Cpp.PkgConfigPath)
 	}
@@ -181,6 +183,9 @@ func TestEnvironment(state *BuildState, target *BuildTarget, testDir string) Bui
 	if target.Test.Sandbox && len(state.Config.Sandbox.Dir) > 0 {
 		env = append(env, "SANDBOX_DIRS="+strings.Join(state.Config.Sandbox.Dir, ","))
 	}
+	if len(state.TestArgs) > 0 {
+		env = append(env, "TESTS="+strings.Join(state.TestArgs, " "))
+	}
 	return withUserProvidedEnv(target, env)
 }
 
@@ -318,7 +323,7 @@ func initStampEnv() {
 	var revision, commitDate, describe string
 	wg.Add(2)
 	go func() {
-		revision = repoScm.CurrentRevIdentifier()
+		revision = repoScm.CurrentRevIdentifier(true)
 		describe = repoScm.DescribeIdentifier(revision)
 		wg.Done()
 	}()

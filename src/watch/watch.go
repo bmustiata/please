@@ -9,15 +9,16 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"gopkg.in/op/go-logging.v1"
 
 	"github.com/thought-machine/please/src/cli"
+	"github.com/thought-machine/please/src/cli/logging"
 	"github.com/thought-machine/please/src/core"
 	"github.com/thought-machine/please/src/fs"
+	"github.com/thought-machine/please/src/process"
 	"github.com/thought-machine/please/src/run"
 )
 
-var log = logging.MustGetLogger("watch")
+var log = logging.Log
 
 const debounceInterval = 100 * time.Millisecond
 
@@ -177,6 +178,6 @@ func build(ctx context.Context, state *core.BuildState, labels []core.BuildLabel
 				BuildLabel: l,
 			}
 		}
-		go run.Parallel(ctx, state, als, nil, state.Config.Please.NumThreads, run.Default, false, false, false, false, "")
+		go run.Parallel(ctx, state, als, nil, state.Config.Please.NumThreads, process.Default, false, false, false, false, "")
 	}
 }

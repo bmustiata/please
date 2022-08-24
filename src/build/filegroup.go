@@ -13,7 +13,6 @@ package build
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"strings"
@@ -44,7 +43,7 @@ type filegroupBuilder struct {
 
 var theFilegroupBuilder *filegroupBuilder
 
-func isSameFileContent(state *core.BuildState, from, to string) (bool, error) {
+func isSameFileContent(state *core.BuildState, hashTimestamp bool, from, to string) (bool, error) {
 	if !fs.PathExists(to) {
 		return false, nil
 	}
@@ -53,11 +52,11 @@ func isSameFileContent(state *core.BuildState, from, to string) (bool, error) {
 		return true, nil
 	}
 
-	h1, err := state.PathHasher.Hash(from, false, true)
+	h1, err := state.PathHasher.Hash(from, false, true, hashTimestamp)
 	if err != nil {
 		return false, err
 	}
-	h2, err := state.PathHasher.Hash(to, false, true)
+	h2, err := state.PathHasher.Hash(to, false, true, hashTimestamp)
 	return bytes.Equal(h1, h2), err
 }
 
@@ -75,12 +74,13 @@ func (builder *filegroupBuilder) Build(state *core.BuildState, target *core.Buil
 	if changed, present := builder.built[to]; present {
 		return changed, nil // File's already been built.
 	}
-	if same, err := isSameFileContent(state, from, to); err != nil {
+	if same, err := isSameFileContent(state, target.HashLastModified(), from, to); err != nil {
 		return false, err
 	} else if same {
 		// File exists already and is the same file. Nothing to do.
 		builder.built[to] = false
 		state.PathHasher.MoveHash(from, to, true)
+
 		return false, nil
 	}
 	// Must actually build the file.
@@ -166,6 +166,6 @@ func writeGoMod() {
 	const contents = "module please-ignore  // Dummy module to exclude this directory from other tools\n"
 	const filename = core.OutDir + "/go.mod"
 	if !fs.PathExists(filename) {
-		ioutil.WriteFile(filename, []byte(contents), 0644)
+		os.WriteFile(filename, []byte(contents), 0644)
 	}
 }

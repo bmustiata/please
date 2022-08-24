@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -12,16 +11,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gopkg.in/op/go-logging.v1"
-
 	"github.com/thought-machine/please/src/build"
+	"github.com/thought-machine/please/src/cli/logging"
 	"github.com/thought-machine/please/src/core"
 	"github.com/thought-machine/please/src/fs"
 	"github.com/thought-machine/please/src/process"
 	"github.com/thought-machine/please/src/worker"
 )
 
-var log = logging.MustGetLogger("test")
+var log = logging.Log
 
 const dummyOutput = "=== RUN DummyTest\n--- PASS: DummyTest (0.00s)\nPASS\n"
 const dummyCoverage = "<?xml version=\"1.0\" ?><coverage></coverage>"
@@ -345,9 +343,7 @@ func testCommandAndEnv(state *core.BuildState, target *core.BuildTarget, run int
 	replacedCmd, err := core.ReplaceTestSequences(state, target, target.GetTestCommand(state))
 	env := core.TestEnvironment(state, target, path.Join(core.RepoRoot, target.TestDir(run)))
 	if len(state.TestArgs) > 0 {
-		args := strings.Join(state.TestArgs, " ")
-		replacedCmd += " " + args
-		env = append(env, "TESTS="+args)
+		replacedCmd += " " + strings.Join(state.TestArgs, " ")
 	}
 	return replacedCmd, env, err
 }
@@ -540,7 +536,7 @@ func moveOutputFile(state *core.BuildState, hash []byte, from, to, dummy string)
 		if dummy == "" {
 			return nil
 		}
-		if err := ioutil.WriteFile(to, []byte(dummy), 0644); err != nil {
+		if err := os.WriteFile(to, []byte(dummy), 0644); err != nil {
 			return err
 		}
 	} else if err := os.Rename(from, to); err != nil {

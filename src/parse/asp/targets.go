@@ -1,6 +1,7 @@
 package asp
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -11,6 +12,9 @@ import (
 
 // filegroupCommand is the command we put on filegroup rules.
 const filegroupCommand = pyString("filegroup")
+
+// textFileCommand is the command we put on text_file rules.
+const textFileCommand = pyString("text_file")
 
 const defaultFlakiness = 3
 
@@ -99,9 +103,9 @@ func createTarget(s *scope, args []pyObject) *core.BuildTarget {
 	target.OutputIsComplete = isTruthy(outputIsCompleteBuildRuleArgIdx)
 	target.Sandbox = isTruthy(sandboxBuildRuleArgIdx)
 	target.TestOnly = test || isTruthy(testOnlyBuildRuleArgIdx)
-	target.ShowProgress = isTruthy(progressBuildRuleArgIdx)
+	target.ShowProgress.Set(isTruthy(progressBuildRuleArgIdx))
 	target.IsRemoteFile = isTruthy(urlsBuildRuleArgIdx)
-	target.IsTextFile = isTruthy(fileContentArgIdx)
+	target.IsTextFile = args[cmdBuildRuleArgIdx] == textFileCommand
 	target.Local = isTruthy(localBuildRuleArgIdx)
 	target.ExitOnError = isTruthy(exitOnErrorArgIdx)
 	for _, o := range asStringList(s, args[outDirsBuildRuleArgIdx], "output_dirs") {
@@ -115,7 +119,7 @@ func createTarget(s *scope, args []pyObject) *core.BuildTarget {
 		target.AddLabel(name)
 	}
 	if args[passEnvBuildRuleArgIdx] != None {
-		l := asStringList(s, args[passEnvBuildRuleArgIdx].(pyList), "pass_env")
+		l := asStringList(s, mustList(args[passEnvBuildRuleArgIdx]), "pass_env")
 		target.PassEnv = &l
 	}
 
@@ -159,11 +163,44 @@ func createTarget(s *scope, args []pyObject) *core.BuildTarget {
 		target.Test.Sandbox = isTruthy(testSandboxBuildRuleArgIdx)
 		target.Test.NoOutput = isTruthy(noTestOutputBuildRuleArgIdx)
 	}
+
+	if err := validateSandbox(s.state, target); err != nil {
+		log.Fatal(err)
+	}
+
 	if s.state.Config.Build.Config == "dbg" {
 		target.Debug = new(core.DebugFields)
 		target.Debug.Command, _ = decodeCommands(s, args[debugCMDBuildRuleArgIdx])
 	}
 	return target
+}
+
+// validateSandbox ensures that the target isn't opting out of the build/test sandbox when it's not allowed to
+func validateSandbox(state *core.BuildState, target *core.BuildTarget) error {
+	if target.IsFilegroup || len(state.Config.Sandbox.ExcludeableTargets) == 0 {
+		return nil
+	}
+	if !target.IsRemoteFile {
+		if target.Sandbox && (target.Test == nil || target.Test.Sandbox) {
+			return nil
+		}
+	}
+
+	if target.Label.PackageName == "_please" {
+		return nil
+	}
+	for _, whitelist := range state.Config.Sandbox.ExcludeableTargets {
+		if whitelist.Matches(target.Label) {
+			return nil
+		}
+	}
+	for _, dir := range state.Config.Parse.ExperimentalDir {
+		if strings.HasPrefix(target.Label.PackageName, dir) {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("%v is not whitelisted to opt out of the sandbox", target)
 }
 
 // sizeAndTimeout handles the size and build/test timeout arguments.
@@ -213,7 +250,7 @@ func decodeCommands(s *scope, obj pyObject) (string, map[string]string) {
 // populateTarget sets the assorted attributes on a build target.
 func populateTarget(s *scope, t *core.BuildTarget, args []pyObject) {
 	if t.IsRemoteFile {
-		for _, url := range args[urlsBuildRuleArgIdx].(pyList) {
+		for _, url := range mustList(args[urlsBuildRuleArgIdx]) {
 			t.AddSource(core.URLLabel(url.(pyString)))
 		}
 	} else if t.IsTextFile {
@@ -232,9 +269,15 @@ func populateTarget(s *scope, t *core.BuildTarget, args []pyObject) {
 	addStrings(s, "hashes", args[hashesBuildRuleArgIdx], t.AddHash)
 	addStrings(s, "licences", args[licencesBuildRuleArgIdx], t.AddLicence)
 	addStrings(s, "requires", args[requiresBuildRuleArgIdx], t.AddRequire)
-	addStrings(s, "visibility", args[visibilityBuildRuleArgIdx], func(str string) {
-		t.Visibility = append(t.Visibility, parseVisibility(s, str))
-	})
+	if vis, ok := asList(args[visibilityBuildRuleArgIdx]); ok && len(vis) != 0 {
+		if v, ok := vis[0].(pyString); ok && v == "PUBLIC" {
+			t.Visibility = core.WholeGraph
+		} else {
+			addStrings(s, "visibility", args[visibilityBuildRuleArgIdx], func(str string) {
+				t.Visibility = append(t.Visibility, parseVisibility(s, str))
+			})
+		}
+	}
 	addEntryPoints(s, args[entryPointsArgIdx], t)
 	addEnv(s, args[envArgIdx], t)
 	addMaybeNamedSecret(s, "secrets", args[secretsBuildRuleArgIdx], t.AddSecret, t.AddNamedSecret, t, true)
@@ -594,6 +637,14 @@ func asList(obj pyObject) (pyList, bool) {
 		return l.pyList, true
 	}
 	return nil, false
+}
+
+// mustList is like asList but returns an empty list if the object isn't a list.
+func mustList(obj pyObject) pyList {
+	if l, ok := asList(obj); ok {
+		return l
+	}
+	return pyList{}
 }
 
 // asDict converts an object to a pyDict, accounting for frozen dicts.

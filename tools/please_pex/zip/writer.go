@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -249,7 +248,7 @@ func (f *File) walk(path string, mode fs.Mode) error {
 				log.Debug("Including existing non-zip file %s as %s", path, targetPath)
 				if info, err := os.Lstat(path); err != nil {
 					return err
-				} else if b, err := ioutil.ReadFile(path); err != nil {
+				} else if b, err := os.ReadFile(path); err != nil {
 					return fmt.Errorf("Error reading %s to zipfile: %s", path, err)
 				} else if err := f.StripBytecodeTimestamp(path, b); err != nil {
 					return err
@@ -446,7 +445,7 @@ func (f *File) WriteFile(filename string, data []byte, mode os.FileMode) error {
 		Method: zip.Deflate,
 	}
 	fh.SetMode(mode)
-	fh.SetModTime(modTime)
+	fh.SetModTime(modTime) //nolint:staticcheck
 
 	for _, ext := range f.StoreSuffix {
 		if strings.HasSuffix(filename, ext) {
@@ -472,7 +471,7 @@ func (f *File) WriteDir(filename string) error {
 		Name:   filename,
 		Method: zip.Store,
 	}
-	fh.SetModTime(modTime)
+	fh.SetModTime(modTime) //nolint:staticcheck
 	if _, err := f.w.CreateHeader(&fh); err != nil {
 		return err
 	}

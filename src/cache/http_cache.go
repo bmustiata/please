@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path"
@@ -82,7 +81,7 @@ func (cache *httpCache) write(w io.WriteCloser, target *core.BuildTarget, files 
 
 	for _, out := range files {
 		if err := fs.Walk(path.Join(outDir, out), func(name string, isDir bool) error {
-			return cache.storeFile(tw, name)
+			return storeFile(tw, name)
 		}); err != nil {
 			log.Warning("Error uploading artifacts to HTTP cache: %s", err)
 			// TODO(peterebden): How can we cancel the request at this point?
@@ -90,7 +89,7 @@ func (cache *httpCache) write(w io.WriteCloser, target *core.BuildTarget, files 
 	}
 }
 
-func (cache *httpCache) storeFile(tw *tar.Writer, name string) error {
+func storeFile(tw *tar.Writer, name string) error {
 	info, err := os.Lstat(name)
 	if err != nil {
 		return err
@@ -151,7 +150,7 @@ func (cache *httpCache) retrieve(key []byte) (bool, error) {
 	if resp.StatusCode == http.StatusNotFound {
 		return false, nil // doesn't exist - not an error
 	} else if resp.StatusCode != http.StatusOK {
-		b, _ := ioutil.ReadAll(resp.Body)
+		b, _ := io.ReadAll(resp.Body)
 		return false, fmt.Errorf("%s", string(b))
 	}
 	gzr, err := gzip.NewReader(resp.Body)
@@ -159,6 +158,10 @@ func (cache *httpCache) retrieve(key []byte) (bool, error) {
 		return false, err
 	}
 	defer gzr.Close()
+	return readTar(gzr)
+}
+
+func readTar(gzr io.Reader) (bool, error) {
 	tr := tar.NewReader(gzr)
 	for {
 		hdr, err := tr.Next()

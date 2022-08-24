@@ -11,6 +11,8 @@ if [ "$OS" = "Linux" ]; then
     GOOS="linux"
 elif [ "$OS" = "Darwin" ]; then
     GOOS="darwin"
+elif [ "$OS" = "FreeBSD" ]; then
+    GOOS="freebsd"
 else
     echo "Unknown operating system $OS"
     exit 1
@@ -35,9 +37,10 @@ mkdir -p "$DIR"
 echo "Downloading Please ${VERSION}..."
 curl -fsSL "${PLEASE_URL}" | tar -xzpf- --strip-components=1 -C "$DIR"
 # Link it all back up a dir
-for x in `ls "$DIR"`; do
+for x in "${DIR}/"*; do
     ln -sf "${DIR}/${x}" "$LOCATION"
 done
+
 ln -sf "${LOCATION}/please" "${LOCATION}/plz"
 mkdir "${LOCATION}/bin"
 curl https://get.please.build/pleasew -s --output "${LOCATION}/bin/plz"

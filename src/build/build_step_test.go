@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"path"
@@ -250,7 +249,7 @@ func TestInitPyCreation(t *testing.T) {
 	assert.True(t, fs.FileExists("plz-out/gen/pypkg/__init__.py"))
 	_, err = buildFilegroup(state, target2)
 	assert.NoError(t, err)
-	d, err := ioutil.ReadFile("plz-out/gen/pypkg/__init__.py")
+	d, err := os.ReadFile("plz-out/gen/pypkg/__init__.py")
 	assert.NoError(t, err)
 	assert.Equal(t, `"""output from //pypkg:target2"""`, strings.TrimSpace(string(d)))
 }
@@ -374,6 +373,29 @@ func TestCheckRuleHashes(t *testing.T) {
 	target.Hashes = []string{"37d6ae61eb7aba324b4633ef518a5a2e88feac81a0f65a67f9de40b55fe91277"}
 	err = checkRuleHashes(state, target, b)
 	assert.NoError(t, err)
+}
+
+func TestHashCheckers(t *testing.T) {
+	state, target := newStateWithHashCheckers("//package3:target1", "sha256", "xxhash")
+	target.AddOutput("file1")
+
+	b, err := state.TargetHasher.OutputHash(target)
+	assert.NoError(t, err)
+
+	// sha256 hash will always succeed since it's the build hash function.
+	target.Hashes = []string{"634b027b1b69e1242d40d53e312b3b4ac7710f55be81f289b549446ef6778bee"}
+	err = checkRuleHashes(state, target, b)
+	assert.NoError(t, err)
+
+	// xxhash hash will pass since it's on the list of hash checkers.
+	target.Hashes = []string{"2f9c985723220c2e"}
+	err = checkRuleHashes(state, target, b)
+	assert.NoError(t, err)
+
+	// blake3 hash will fail since it's not on the list of hash checkers.
+	target.Hashes = []string{"37d6ae61eb7aba324b4633ef518a5a2e88feac81a0f65a67f9de40b55fe91277"}
+	err = checkRuleHashes(state, target, b)
+	assert.Error(t, err)
 }
 
 func TestFetchLocalRemoteFile(t *testing.T) {
@@ -507,6 +529,25 @@ func TestSha1SingleHash(t *testing.T) {
 	}
 }
 
+func newStateWithHashCheckers(label, hashFunction string, hashCheckers ...string) (*core.BuildState, *core.BuildTarget) {
+	config, _ := core.ReadConfigFiles(nil, nil)
+	if hashFunction != "" {
+		config.Build.HashFunction = hashFunction
+	}
+	if len(hashCheckers) > 0 {
+		config.Build.HashCheckers = hashCheckers
+	}
+	state := core.NewBuildState(config)
+	state.Config.Parse.BuildFileName = []string{"BUILD_FILE"}
+	target := core.NewBuildTarget(core.ParseBuildLabel(label, ""))
+	target.Command = fmt.Sprintf("echo 'output of %s' > $OUT", target.Label)
+	target.BuildTimeout = 100 * time.Second
+	state.Graph.AddTarget(target)
+	state.Parser = &fakeParser{}
+	Init(state)
+	return state, target
+}
+
 func newStateWithHashFunc(label, hashFunc string, sha1ForceCombine bool) (*core.BuildState, *core.BuildTarget) {
 	config, _ := core.ReadConfigFiles(nil, nil)
 	config.Build.HashFunction = hashFunc
@@ -553,14 +594,14 @@ func (*mockCache) Store(target *core.BuildTarget, key []byte, files []string) {
 
 func (*mockCache) Retrieve(target *core.BuildTarget, key []byte, outputs []string) bool {
 	if target.Label.Name == "target8" {
-		ioutil.WriteFile("plz-out/gen/package1/file8", []byte("retrieved from cache"), 0664)
+		os.WriteFile("plz-out/gen/package1/file8", []byte("retrieved from cache"), 0664)
 		md := &core.BuildMetadata{}
 		if err := StoreTargetMetadata(target, md); err != nil {
 			panic(err)
 		}
 		return true
 	} else if target.Label.Name == "target10" {
-		ioutil.WriteFile("plz-out/gen/package1/file10", []byte("retrieved from cache"), 0664)
+		os.WriteFile("plz-out/gen/package1/file10", []byte("retrieved from cache"), 0664)
 		md := &core.BuildMetadata{Stdout: []byte("retrieved from cache")}
 		if err := StoreTargetMetadata(target, md); err != nil {
 			panic(err)
@@ -578,12 +619,25 @@ type fakeParser struct {
 }
 
 // ParseFile stub
-func (fake *fakeParser) ParseFile(state *core.BuildState, pkg *core.Package, filename string) error {
+func (fake *fakeParser) ParseFile(pkg *core.Package, filename string) error {
 	return nil
 }
 
+func (fake *fakeParser) WaitForInit() {
+
+}
+
+func (fake *fakeParser) Init(*core.BuildState) {
+
+}
+
+// PreloadSubinclude stub
+func (fake *fakeParser) NewParser(state *core.BuildState) {
+
+}
+
 // ParseReader stub
-func (fake *fakeParser) ParseReader(state *core.BuildState, pkg *core.Package, r io.ReadSeeker) error {
+func (fake *fakeParser) ParseReader(pkg *core.Package, r io.ReadSeeker) error {
 	return nil
 }
 
