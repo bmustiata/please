@@ -398,7 +398,8 @@ var opts struct {
 			} `positional-args:"true" required:"true"`
 		} `command:"output" alias:"outputs" description:"Prints all outputs of a target."`
 		Graph struct {
-			Args struct {
+			Stack bool `long:"stack" short:"s" description:"Output also the invocation stack for each target."`
+			Args  struct {
 				Targets []core.BuildLabel `positional-arg-name:"targets" description:"Targets to render graph for"`
 			} `positional-args:"true"`
 		} `command:"graph" description:"Prints a representation of the build graph."`
