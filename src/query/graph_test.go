@@ -28,6 +28,11 @@ func TestQuerySingleTarget(t *testing.T) {
 	pkg1 := graph.Packages["package1"]
 	assert.Equal(t, 2, len(pkg1.Targets))
 	assert.Equal(t, []string{"//package1:target1"}, pkg1.Targets["target2"].Deps)
+	assert.Equal(t, []string{"//package1:target1"}, pkg1.Targets["target2"].Deps)
+	assert.Equal(t, []string{
+		"BUILD:10",
+		"file.plz:15",
+	}, pkg1.Targets["target2"].Stack)
 }
 
 func TestQueryPackage(t *testing.T) {
@@ -65,5 +70,11 @@ func makeTarget(label string, deps ...string) *core.BuildTarget {
 	for _, dep := range deps {
 		target.AddDependency(core.ParseBuildLabel(dep, ""))
 	}
+
+	target.Stack = []string{
+		"BUILD:10",
+		"file.plz:15",
+	}
+
 	return target
 }

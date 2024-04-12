@@ -240,6 +240,8 @@ type BuildTarget struct {
 	// If true, the interactive progress display will try to infer the target's progress
 	// via some heuristics on its output.
 	ShowProgress atomicBool `name:"progress"`
+	// If set, it contains the stack used to create this target.
+	Stack []string `print:"false"`
 }
 
 // ExpectedBuildMetadataVersionTag is the version tag that the current Please version expects. If this doesn't match

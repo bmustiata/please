@@ -56,6 +56,7 @@ type JSONTarget struct {
 	Test     bool        `json:"test,omitempty" note:"true if target is a test"`
 	Binary   bool        `json:"binary,omitempty" note:"true if target is a binary"`
 	TestOnly bool        `json:"test_only,omitempty" note:"true if target should be restricted to test code"`
+	Stack    []string    `json:"stack,omitempty" note:"the code stack at the time of creation of the target"`
 }
 
 func makeJSONGraph(state *core.BuildState, targets []core.BuildLabel) *JSONGraph {
@@ -174,6 +175,12 @@ func makeJSONTarget(state *core.BuildState, target *core.BuildTarget) JSONTarget
 	t.Test = target.IsTest()
 	t.Binary = target.IsBinary
 	t.TestOnly = target.TestOnly
+
+	if target.Stack != nil {
+		t.Stack = make([]string, len(target.Stack))
+		copy(t.Stack, target.Stack)
+	}
+
 	return t
 }
 
